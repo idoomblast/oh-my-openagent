@@ -142,21 +142,20 @@ describe("multi-manager notification dedup", () => {
     await managerB.shutdown()
   })
 
-  test("shutdown of one manager does not clear shared store state", async () => {
+  test("shutdown of one manager does not clear shared dedup state", async () => {
     _resetBackgroundTaskStoresForTesting()
     const directory = join(tmpdir(), `omo-dedup-${Date.now()}-survive`)
 
     const managerA = new BackgroundManager({ pluginContext: createPluginInput(directory) })
     const managerB = new BackgroundManager({ pluginContext: createPluginInput(directory) })
 
-    const task = createTask({ id: "bg_persist" })
-    managerA["tasks"].set(task.id, task)
+    const store = getOrCreateBackgroundTaskStore(directory)
+    expect(store.tryClaimTerminalTransition("bg_persist", "completed")).toBe(true)
 
     await managerA.shutdown()
 
-    expect(managerB["tasks"].get(task.id)).toBe(task)
-    const store = getOrCreateBackgroundTaskStore(directory)
-    expect(store.tasks.get(task.id)).toBe(task)
+    expect(store.tryClaimTerminalTransition("bg_persist", "completed")).toBe(false)
+    expect(getOrCreateBackgroundTaskStore(directory).tryClaimTerminalTransition("bg_persist", "completed")).toBe(false)
 
     await managerB.shutdown()
   })

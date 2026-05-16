@@ -1,44 +1,19 @@
 import { log } from "../../shared/logger"
-import type { BackgroundTask } from "./types"
-
-type ParentWakePromptContext = {
-  agent?: string
-  model?: { providerID: string; modelID: string }
-  variant?: string
-  tools?: Record<string, boolean>
-}
-
-export type PendingParentWake = {
-  promptContext: ParentWakePromptContext
-  notifications: string[]
-  shouldReply: boolean
-}
 
 /**
- * Process-level shared task storage. Multiple `BackgroundManager` instances
- * for the same working directory (typical with `opencode serve` plus
- * multiple `opencode attach` clients) reference the same Maps so that
- * `task` and `background_output` always observe the same task set.
+ * Cross-manager dedup state shared per-directory across all
+ * `BackgroundManager` instances in the same process (typical under
+ * `opencode serve` + multiple `opencode attach` clients, where each
+ * attach triggers a fresh `serverPlugin()` invocation and constructs
+ * its own `BackgroundManager`).
  *
- * Storage AND notification-coordination state is shared. Per-manager
- * lifecycle (polling intervals, in-flight session abort, per-instance
- * timers) stays per-instance.
- *
- * Shared additions over the original task-only store:
- * - `pendingParentWakes`: queued parent-wake payloads (any manager's flush
- *   timer can drain them).
- * - `notificationQueueByParent`: per-parent serialization chain so wakes for
- *   the same parent never interleave even across managers.
- * - `emittedTerminalTransitions`: dedup set so a "task X reached terminal
- *   status Y" event emits exactly one parent notification, regardless of
- *   how many managers observed the underlying signal.
+ * Task data itself is NOT stored here — that's handled per-instance plus
+ * `task-registry.ts` (globalThis-backed registry of redacted clones).
+ * The single responsibility of this store is the dedup primitive below:
+ * when multiple managers observe the same session-idle event for a child
+ * task, only one of them gets to emit the parent notification.
  */
 export class BackgroundTaskStore {
-  readonly tasks = new Map<string, BackgroundTask>()
-  readonly tasksByParentSession = new Map<string, Set<string>>()
-  readonly completedTaskArchive = new Map<string, BackgroundTask>()
-  readonly pendingParentWakes = new Map<string, PendingParentWake>()
-  readonly notificationQueueByParent = new Map<string, Promise<void>>()
   readonly emittedTerminalTransitions = new Set<string>()
 
   /**
@@ -74,7 +49,7 @@ export function getOrCreateBackgroundTaskStore(key: string): BackgroundTaskStore
   return store
 }
 
-/** Test-only. Never call from production code: would orphan live tasks. */
+/** Test-only. Production code must never call this. */
 export function _resetBackgroundTaskStoresForTesting(): void {
   stores.clear()
 }
