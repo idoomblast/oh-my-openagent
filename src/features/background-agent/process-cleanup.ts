@@ -4,23 +4,39 @@ type ProcessCleanupSignal = NodeJS.Signals | "beforeExit" | "exit"
 type ProcessCleanupErrorEvent = "uncaughtException" | "unhandledRejection"
 
 /**
- * When set to a truthy value (1/true/yes/on), suppresses the global
- * uncaughtException / unhandledRejection handlers that force-exit the host
- * process. Use this when the plugin is installed but background-agent tasks
- * are not actively in use, to avoid OpenCode dying on transient streaming
- * errors propagated as unhandled rejections (see issue #3856).
- *
- * Signal handlers (SIGINT/SIGTERM/SIGBREAK/beforeExit/exit) remain registered
- * because they are needed for graceful shutdown of any in-flight cleanup
- * targets that were registered before the user noticed the issue.
+ * When set to a truthy value (1/true/yes/on), suppresses BOTH global
+ * uncaughtException AND unhandledRejection handlers entirely (legacy
+ * opt-out from issue #3856). Signal handlers stay registered.
  */
 const PROCESS_CLEANUP_DISABLE_ENV = "OMO_DISABLE_PROCESS_CLEANUP"
+
+/**
+ * When set to a truthy value, OPTS IN to the legacy behavior where an
+ * unhandledRejection from anywhere in the host (including OpenCode core
+ * or unrelated plugins) force-exits the process. Default is now log-only
+ * for rejections to prevent OMO from killing the sidecar/server on
+ * transient or third-party rejections (see issue #4061 + the model.trim
+ * crash chain observed 2026-05-16).
+ *
+ * uncaughtException ALWAYS force-exits regardless of this flag — a
+ * synchronously-thrown unhandled exception means the process state is
+ * already corrupt.
+ */
+const FORCE_EXIT_ON_REJECTION_ENV = "OMO_FORCE_EXIT_ON_REJECTION"
 const TRUTHY_ENV_VALUES = new Set(["1", "true", "yes", "on"])
 
-function isProcessCleanupErrorHandlersDisabled(): boolean {
-  const raw = process.env[PROCESS_CLEANUP_DISABLE_ENV]
+function isTruthyEnv(name: string): boolean {
+  const raw = process.env[name]
   if (!raw) return false
   return TRUTHY_ENV_VALUES.has(raw.trim().toLowerCase())
+}
+
+function isProcessCleanupErrorHandlersDisabled(): boolean {
+  return isTruthyEnv(PROCESS_CLEANUP_DISABLE_ENV)
+}
+
+function isForceExitOnRejectionEnabled(): boolean {
+  return isTruthyEnv(FORCE_EXIT_ON_REJECTION_ENV)
 }
 
 /** @internal test-only seam: prevents process.exitCode from contaminating bun test runner */
@@ -80,6 +96,30 @@ function registerErrorEvent(
     process.off(signal, listener)
     log(`[background-agent] ${signal} received during shutdown cleanup:`, error)
     scheduleForcedExit(handler(error), 1, true)
+  }
+  process.on(signal, listener)
+  return listener
+}
+
+/**
+ * Log the rejection but do NOT shut down or exit. Used for unhandledRejection
+ * by default, so OMO no longer kills the OpenCode host (CLI/Desktop sidecar)
+ * on rejections that originated outside OMO code paths.
+ *
+ * Re-attaches itself after each invocation so subsequent rejections keep
+ * being observed (Node's default would otherwise be silent).
+ */
+function registerLoggingErrorEvent(
+  signal: ProcessCleanupErrorEvent,
+): (error: unknown) => void {
+  const listener = (error: unknown) => {
+    process.off(signal, listener)
+    log(
+      `[background-agent] ${signal} observed (non-fatal: OMO does not exit on this; `
+        + `set ${FORCE_EXIT_ON_REJECTION_ENV}=1 to restore legacy force-exit):`,
+      error,
+    )
+    process.on(signal, listener)
   }
   process.on(signal, listener)
   return listener
@@ -145,8 +185,26 @@ export function registerManagerForCleanup(manager: CleanupTarget): void {
     return
   }
 
+  // uncaughtException still force-exits: a synchronously-thrown unhandled
+  // exception means the process state is already corrupt.
   cleanupErrorHandlers.set("uncaughtException", registerErrorEvent("uncaughtException", cleanupAll))
-  cleanupErrorHandlers.set("unhandledRejection", registerErrorEvent("unhandledRejection", cleanupAll))
+
+  // unhandledRejection defaults to log-only. The legacy force-exit behavior
+  // killed the OpenCode host on rejections from OpenCode core (e.g. the
+  // model.trim crash) or unrelated plugins (e.g. ctx.$ from notification
+  // code, see issue #4061). Opt back in with OMO_FORCE_EXIT_ON_REJECTION=1.
+  if (isForceExitOnRejectionEnabled()) {
+    log(
+      `[background-agent] ${FORCE_EXIT_ON_REJECTION_ENV} is set; restoring legacy `
+        + "force-exit-on-unhandledRejection behavior.",
+    )
+    cleanupErrorHandlers.set(
+      "unhandledRejection",
+      registerErrorEvent("unhandledRejection", cleanupAll),
+    )
+  } else {
+    cleanupErrorHandlers.set("unhandledRejection", registerLoggingErrorEvent("unhandledRejection"))
+  }
 }
 
 export function unregisterManagerForCleanup(manager: CleanupTarget): void {

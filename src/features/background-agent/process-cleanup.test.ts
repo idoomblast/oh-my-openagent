@@ -353,7 +353,12 @@ describe("#given process cleanup registration", () => {
       }
     })
 
-    test("#given manager registered AND process emits unhandledRejection #when event fires #then manager shuts down before process exits", async () => {
+    test("#given manager registered AND process emits unhandledRejection #when event fires #then manager does NOT shut down (log-only by default)", async () => {
+      // Regression guard for the model.trim host-killer (issue #4061).
+      // Before the fix, an unhandledRejection from anywhere in the host
+      // (including OpenCode core or unrelated plugins) ran cleanupAll +
+      // process.exit(1), killing the entire OpenCode server/sidecar.
+      // The new default logs the rejection and keeps running.
       const exitSpy = spyOn(process, "exit").mockImplementation((() => undefined) as never)
       const shutdown = mock(() => {})
       const manager = { shutdown }
@@ -365,9 +370,8 @@ describe("#given process cleanup registration", () => {
         process.emit("unhandledRejection", new Error("boom"), Promise.resolve())
         await flushMicrotasks()
 
-        expect(shutdown).toHaveBeenCalledTimes(1)
-        // exitSpy check skipped: scheduleForcedExit is disabled in tests to prevent
-        // process.exitCode from contaminating the bun test runner exit code.
+        expect(shutdown).not.toHaveBeenCalled()
+        expect(exitSpy).not.toHaveBeenCalled()
       } finally {
         exitSpy.mockRestore()
       }
@@ -427,6 +431,118 @@ describe("#given process cleanup registration", () => {
       await flushMicrotasks()
 
       expect(reentrantShutdown.mock.calls.length).toBeLessThanOrEqual(1)
+    })
+
+    test("#given default config AND unhandledRejection fires repeatedly #when 3 rejections arrive #then listener observes all 3 (re-attaches itself)", () => {
+      const observed: unknown[] = []
+      const log = (..._args: unknown[]): void => undefined
+      void log
+      const shutdown = mock(() => {})
+      const manager = { shutdown }
+      registeredManagers.push(manager)
+
+      registerManagerForCleanup(manager)
+
+      // The log-only listener must re-attach after each invocation so that
+      // subsequent rejections continue to be observed. Without re-attachment,
+      // the first detach-before-body would silently drop every rejection
+      // after the first one.
+      const initialListenerCount = process.listeners("unhandledRejection").length
+
+      process.emit("unhandledRejection", new Error("first"), Promise.resolve())
+      process.emit("unhandledRejection", new Error("second"), Promise.resolve())
+      process.emit("unhandledRejection", new Error("third"), Promise.resolve())
+      void observed
+
+      expect(process.listeners("unhandledRejection").length).toBe(initialListenerCount)
+      expect(shutdown).not.toHaveBeenCalled()
+    })
+  })
+
+  describe("#given OMO_FORCE_EXIT_ON_REJECTION env var", () => {
+    let originalEnvValue: string | undefined
+
+    beforeEach(() => {
+      originalEnvValue = process.env.OMO_FORCE_EXIT_ON_REJECTION
+    })
+
+    afterEach(() => {
+      if (originalEnvValue === undefined) {
+        delete process.env.OMO_FORCE_EXIT_ON_REJECTION
+      } else {
+        process.env.OMO_FORCE_EXIT_ON_REJECTION = originalEnvValue
+      }
+    })
+
+    test("#given env var unset #when unhandledRejection fires #then manager does NOT shut down (log-only default)", async () => {
+      delete process.env.OMO_FORCE_EXIT_ON_REJECTION
+      const shutdown = mock(() => {})
+      const manager = { shutdown }
+      registeredManagers.push(manager)
+
+      registerManagerForCleanup(manager)
+
+      process.emit("unhandledRejection", new Error("boom"), Promise.resolve())
+      await flushMicrotasks()
+
+      expect(shutdown).not.toHaveBeenCalled()
+    })
+
+    test("#given env var set to 1 #when unhandledRejection fires #then manager DOES shut down (legacy force-exit restored)", async () => {
+      process.env.OMO_FORCE_EXIT_ON_REJECTION = "1"
+      const shutdown = mock(() => {})
+      const manager = { shutdown }
+      registeredManagers.push(manager)
+
+      registerManagerForCleanup(manager)
+
+      process.emit("unhandledRejection", new Error("boom"), Promise.resolve())
+      await flushMicrotasks()
+
+      expect(shutdown).toHaveBeenCalledTimes(1)
+    })
+
+    test("#given env var set to true #when registerManagerForCleanup runs #then unhandledRejection handler IS registered", () => {
+      const unhandledRejectionListenersBefore = process.listeners("unhandledRejection")
+      process.env.OMO_FORCE_EXIT_ON_REJECTION = "true"
+      const manager = { shutdown: mock(() => {}) }
+      registeredManagers.push(manager)
+
+      registerManagerForCleanup(manager)
+
+      // Both default (log-only) and opt-in (force-exit) register exactly one
+      // listener. The difference is what the listener does, not whether it
+      // exists. Test the behavior (shutdown invocation) above; this assertion
+      // confirms the listener count contract.
+      expect(process.listeners("unhandledRejection")).toHaveLength(unhandledRejectionListenersBefore.length + 1)
+    })
+
+    test("#given env var set #when uncaughtException fires #then still force-exits regardless (env var only affects rejection)", async () => {
+      process.env.OMO_FORCE_EXIT_ON_REJECTION = "1"
+      const shutdown = mock(() => {})
+      const manager = { shutdown }
+      registeredManagers.push(manager)
+
+      registerManagerForCleanup(manager)
+
+      process.emit("uncaughtException", new Error("sync throw"))
+      await flushMicrotasks()
+
+      expect(shutdown).toHaveBeenCalledTimes(1)
+    })
+
+    test("#given env var UNSET #when uncaughtException fires #then still force-exits (uncaughtException is always fatal)", async () => {
+      delete process.env.OMO_FORCE_EXIT_ON_REJECTION
+      const shutdown = mock(() => {})
+      const manager = { shutdown }
+      registeredManagers.push(manager)
+
+      registerManagerForCleanup(manager)
+
+      process.emit("uncaughtException", new Error("sync throw"))
+      await flushMicrotasks()
+
+      expect(shutdown).toHaveBeenCalledTimes(1)
     })
   })
 })
