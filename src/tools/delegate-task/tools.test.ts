@@ -4188,7 +4188,7 @@ describe("sisyphus-task", () => {
       expect(promptBody.tools.task).toBe(true)
     }, { timeout: 20000 })
 
-    test("prometheus primary agent should not be callable via task", async () => {
+    test("prometheus primary agent IS callable via task from non-plan-family parent (plan-family handoff)", async () => {
       //#given
       const { createDelegateTask } = require("./tools")
        const mockClient = {
@@ -4211,8 +4211,8 @@ describe("sisyphus-task", () => {
         { sessionID: "p", messageID: "m", agent: "sisyphus", abort: new AbortController().signal }
       )
       
-      //#then
-      expect(result).toContain('Cannot delegate to primary agent "prometheus" via task. Select that agent directly instead.')
+      //#then - delegation should succeed (no "Cannot delegate to primary agent" error)
+      expect(result).not.toContain('Cannot delegate to primary agent')
     }, { timeout: 20000 })
 
     test("non-plan subagent should NOT have task permission", async () => {

@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 import { afterEach, beforeEach, mock } from "bun:test"
 import { rmSync } from "node:fs"
+import { _resetBackgroundTaskStoresForTesting as resetBackgroundTaskStores } from "./src/features/background-agent/task-store"
 import { _resetForTesting as resetClaudeSessionState } from "./src/features/claude-code-session-state/state"
 import { _resetTaskToastManagerForTesting as resetTaskToastManager } from "./src/features/task-toast-manager/manager"
 import { _resetForTesting as resetModelFallbackState } from "./src/hooks/model-fallback/hook"
@@ -22,6 +23,7 @@ beforeEach(() => {
   workingDirectorySnapshot = process.cwd()
   process.env.OMO_DISABLE_POSTHOG = "true"
   cleanupOmoCacheDir(getOmoOpenCodeCacheDir())
+  resetBackgroundTaskStores()
   resetClaudeSessionState()
   resetTaskToastManager()
   resetModelFallbackState()
