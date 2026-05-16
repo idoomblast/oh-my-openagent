@@ -85,7 +85,15 @@ Create the work plan directly - that's your job as the planning agent.`,
     const mergedAgents = mergeWithClaudeCodeAgents(agents, executorCtx.directory)
     const matchedPrimaryAgent = findPrimaryAgentMatch(mergedAgents, agentToUse)
 
-    if (matchedPrimaryAgent && !options.allowPrimaryAgentDelegation) {
+    // Plan-family primary agents (Prometheus) are intentionally callable from non-plan-family
+    // parents (e.g. Sisyphus → Prometheus) so the planner-delegation pattern injected by
+    // `buildNonClaudePlannerSection` resolves successfully. Other primary agents (Sisyphus,
+    // Hephaestus, Atlas) remain blocked outside the team-mode opt-in path.
+    const isPlanFamilyHandoff = matchedPrimaryAgent !== undefined
+      && isPlanFamily(agentName)
+      && !isPlanFamily(parentAgent)
+
+    if (matchedPrimaryAgent && !options.allowPrimaryAgentDelegation && !isPlanFamilyHandoff) {
       return {
         agentToUse: "",
         categoryModel: undefined,
@@ -93,7 +101,7 @@ Create the work plan directly - that's your job as the planning agent.`,
       }
     }
 
-    const usePrimary = options.allowPrimaryAgentDelegation && matchedPrimaryAgent !== undefined
+    const usePrimary = (options.allowPrimaryAgentDelegation || isPlanFamilyHandoff) && matchedPrimaryAgent !== undefined
     const matchedAgent = usePrimary
       ? matchedPrimaryAgent
       : findCallableAgentMatch(mergedAgents, agentToUse)

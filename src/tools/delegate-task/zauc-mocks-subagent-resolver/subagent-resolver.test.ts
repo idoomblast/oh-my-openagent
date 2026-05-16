@@ -151,11 +151,16 @@ describe("resolveSubagentExecution", () => {
     expect(result.error).toBe('Cannot delegate to primary agent "sisyphus" via task. Select that agent directly instead.')
   })
 
-  test("returns explicit error for primary display-name agents", async () => {
+  test("allows non-plan-family parent to delegate to Prometheus (plan-family handoff)", async () => {
     //#given
+    readProviderModelsCacheMock.mockReturnValue({
+      models: { anthropic: ["claude-opus-4-7"] },
+      connected: ["anthropic"],
+      updatedAt: "2026-03-03T00:00:00.000Z",
+    })
     const args = createBaseArgs({ subagent_type: "Prometheus - Plan Builder" })
     const executorCtx = createExecutorContext(async () => ([
-      { name: "Prometheus - Plan Builder", mode: "primary" },
+      { name: "Prometheus - Plan Builder", mode: "primary", model: "anthropic/claude-opus-4-7" },
       { name: "oracle", mode: "subagent" },
     ]))
 
@@ -163,9 +168,25 @@ describe("resolveSubagentExecution", () => {
     const result = await resolveSubagentExecution(args, executorCtx, "sisyphus", "deep")
 
     //#then
+    expect(result.error).toBeUndefined()
+    expect(result.agentToUse).toBe("Prometheus - Plan Builder")
+  })
+
+  test("blocks plan-family parent from delegating to Prometheus (planner cannot delegate to planner)", async () => {
+    //#given
+    const args = createBaseArgs({ subagent_type: "prometheus" })
+    const executorCtx = createExecutorContext(async () => ([
+      { name: "Prometheus - Plan Builder", mode: "primary" },
+      { name: "oracle", mode: "subagent" },
+    ]))
+
+    //#when
+    const result = await resolveSubagentExecution(args, executorCtx, "prometheus", "deep")
+
+    //#then
     expect(result.agentToUse).toBe("")
     expect(result.categoryModel).toBeUndefined()
-    expect(result.error).toBe('Cannot delegate to primary agent "Prometheus - Plan Builder" via task. Select that agent directly instead.')
+    expect(result.error).toContain("plan-family")
   })
 
   test("allows delegating to a primary agent when allowPrimaryAgentDelegation is enabled (team-mode path)", async () => {

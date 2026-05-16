@@ -36,6 +36,7 @@ import {
   TASK_TTL_MS,
   type QueueItem,
 } from "./constants"
+import { getOrCreateBackgroundTaskStore, type BackgroundTaskStore } from "./task-store"
 
 import { resolveRegisteredAgentName, subagentSessions } from "../claude-code-session-state"
 import { getTaskToastManager } from "../task-toast-manager"
@@ -249,6 +250,7 @@ export interface BackgroundManagerConfig {
 export class BackgroundManager {
 
 
+  private taskStore: BackgroundTaskStore
   private tasks: Map<string, BackgroundTask>
   private tasksByParentSession: Map<string, Set<string>>
   private notifications: Map<string, BackgroundTask[]>
@@ -268,11 +270,11 @@ export class BackgroundManager {
   private queuesByKey: Map<string, QueueItem[]> = new Map()
   private processingKeys: Set<string> = new Set()
   private completionTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
-  private completedTaskArchive: Map<string, BackgroundTask> = new Map()
+  private completedTaskArchive: Map<string, BackgroundTask>
   private completedTaskSummaries: Map<string, BackgroundTaskNotificationTask[]> = new Map()
   private idleDeferralTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
-  private notificationQueueByParent: Map<string, Promise<void>> = new Map()
-  private pendingParentWakes: Map<string, PendingParentWake> = new Map()
+  private notificationQueueByParent: Map<string, Promise<void>>
+  private pendingParentWakes: Map<string, PendingParentWake>
   private pendingParentWakeTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
   private dispatchedParentWakes: Map<string, PendingParentWake> = new Map()
   private dispatchedParentWakeTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
@@ -289,8 +291,13 @@ export class BackgroundManager {
 
   constructor(config: BackgroundManagerConfig) {
     const { pluginContext, ...options } = config
-    this.tasks = new Map()
-    this.tasksByParentSession = new Map()
+    const taskStore = getOrCreateBackgroundTaskStore(pluginContext.directory)
+    this.taskStore = taskStore
+    this.tasks = taskStore.tasks
+    this.tasksByParentSession = taskStore.tasksByParentSession
+    this.completedTaskArchive = taskStore.completedTaskArchive
+    this.pendingParentWakes = taskStore.pendingParentWakes
+    this.notificationQueueByParent = taskStore.notificationQueueByParent
     this.notifications = new Map()
     this.pendingNotifications = new Map()
     this.pendingByParent = new Map()
@@ -688,8 +695,7 @@ export class BackgroundManager {
           // Update continuation marker for CLI run mode
           this.updateBackgroundTaskMarker(item.task.parentSessionId)
 
-          this.markForNotification(item.task)
-          this.enqueueNotificationForParent(item.task.parentSessionId, () => this.notifyParentSession(item.task)).catch(err => {
+          this.emitTerminalNotification(item.task, "start-error").catch(err => {
             log("[background-agent] Failed to notify on startTask error:", err)
           })
         }
@@ -951,8 +957,7 @@ The fallback retry session is now created and can be inspected directly.
         // Awaited to prevent dangling promise during subagent teardown (Bun/WebKit SIGABRT)
         await this.abortSessionWithLogging(sessionID, "launch error cleanup")
 
-        this.markForNotification(existingTask)
-        this.enqueueNotificationForParent(existingTask.parentSessionId, () => this.notifyParentSession(existingTask)).catch(err => {
+        this.emitTerminalNotification(existingTask, "launch-error").catch(err => {
           log("[background-agent] Failed to notify on error:", err)
         })
       }
@@ -1339,8 +1344,7 @@ The fallback retry session is now created and can be inspected directly.
         await this.abortSessionWithLogging(existingTask.sessionId, "resume error cleanup")
       }
 
-      this.markForNotification(existingTask)
-      this.enqueueNotificationForParent(existingTask.parentSessionId, () => this.notifyParentSession(existingTask)).catch(err => {
+      this.emitTerminalNotification(existingTask, "resume-error").catch(err => {
         log("[background-agent] Failed to notify on resume error:", err)
       })
     })
@@ -1970,10 +1974,7 @@ The fallback retry session is now created and can be inspected directly.
     }
 
     this.updateBackgroundTaskMarker(task.parentSessionId)
-    this.markForNotification(task)
-    this.enqueueNotificationForParent(task.parentSessionId, () => this.notifyParentSession(task)).catch(err => {
-      log("[background-agent] Failed to notify on async prompt failure:", { taskId: task.id, error: err })
-    })
+    await this.emitTerminalNotification(task, "async-failure")
   }
 
   private async handleSessionErrorEvent(args: {
@@ -2079,8 +2080,7 @@ The fallback retry session is now created and can be inspected directly.
       this.updateBackgroundTaskMarker(task.parentSessionId)
     }
 
-    this.markForNotification(task)
-    this.enqueueNotificationForParent(task.parentSessionId, () => this.notifyParentSession(task)).catch(err => {
+    this.emitTerminalNotification(task, "session-error").catch(err => {
       log("[background-agent] Error in notifyParentSession for errored task:", { taskId: task.id, error: err })
     })
   }
@@ -2137,6 +2137,19 @@ The task was re-queued on a fallback model after a retryable failure.
     const queue = this.notifications.get(task.parentSessionId) ?? []
     queue.push(task)
     this.notifications.set(task.parentSessionId, queue)
+  }
+
+  private async emitTerminalNotification(task: BackgroundTask, transition: string): Promise<boolean> {
+    if (!this.taskStore.tryClaimTerminalTransition(task.id, transition)) {
+      log("[background-agent] Skipping duplicate terminal notification:", {
+        taskId: task.id,
+        transition,
+      })
+      return false
+    }
+    this.markForNotification(task)
+    await this.enqueueNotificationForParent(task.parentSessionId, () => this.notifyParentSession(task))
+    return true
   }
 
   getPendingNotifications(sessionID: string): BackgroundTask[] {
@@ -2384,10 +2397,8 @@ The task was re-queued on a fallback model after a retryable failure.
       return true
     }
 
-    this.markForNotification(task)
-
     try {
-      await this.enqueueNotificationForParent(task.parentSessionId, () => this.notifyParentSession(task))
+      await this.emitTerminalNotification(task, "cancelled")
       log(`[background-agent] Task cancelled via ${source}:`, task.id)
     } catch (err) {
       log("[background-agent] Error in notifyParentSession for cancelled task:", { taskId: task.id, error: err })
@@ -2480,8 +2491,6 @@ The task was re-queued on a fallback model after a retryable failure.
       task.concurrencyKey = undefined
     }
 
-    this.markForNotification(task)
-
     const idleTimer = this.idleDeferralTimers.get(task.id)
     if (idleTimer) {
       clearTimeout(idleTimer)
@@ -2501,7 +2510,7 @@ The task was re-queued on a fallback model after a retryable failure.
     }
 
     try {
-      await this.enqueueNotificationForParent(task.parentSessionId, () => this.notifyParentSession(task))
+      await this.emitTerminalNotification(task, "completed")
       log(`[background-agent] Task completed via ${source}:`, task.id)
     } catch (err) {
       log("[background-agent] Error in notifyParentSession:", { taskId: task.id, error: err })
@@ -2883,8 +2892,7 @@ The task was re-queued on a fallback model after a retryable failure.
         if (task.parentSessionId) {
           this.updateBackgroundTaskMarker(task.parentSessionId)
         }
-        this.markForNotification(task)
-        this.enqueueNotificationForParent(task.parentSessionId, () => this.notifyParentSession(task)).catch(err => {
+        this.emitTerminalNotification(task, "pruned").catch(err => {
           log("[background-agent] Error in notifyParentSession for stale-pruned task:", { taskId: task.id, error: err })
         })
       },
@@ -2900,7 +2908,7 @@ The task was re-queued on a fallback model after a retryable failure.
       directory: this.directory,
       config: this.config,
       concurrencyManager: this.concurrencyManager,
-      notifyParentSession: (task) => this.enqueueNotificationForParent(task.parentSessionId, () => this.notifyParentSession(task)),
+      notifyParentSession: async (task) => { await this.emitTerminalNotification(task, "stale-interrupt") },
       sessionStatuses: allStatuses,
     })
   }
@@ -2950,8 +2958,7 @@ The task was re-queued on a fallback model after a retryable failure.
       this.updateBackgroundTaskMarker(task.parentSessionId)
     }
 
-    this.markForNotification(task)
-    this.enqueueNotificationForParent(task.parentSessionId, () => this.notifyParentSession(task)).catch(err => {
+    this.emitTerminalNotification(task, "crashed").catch(err => {
       log("[background-agent] Error in notifyParentSession for crashed task:", { taskId: task.id, error: err })
     })
   }
@@ -3161,14 +3168,14 @@ The task was re-queued on a fallback model after a retryable failure.
     }
 
     this.concurrencyManager.clear()
-    this.tasks.clear()
-    this.tasksByParentSession.clear()
+    // Shared store state (tasks, tasksByParentSession, pendingParentWakes,
+    // notificationQueueByParent) intentionally NOT cleared here: other
+    // BackgroundManager instances for the same directory may still be using
+    // it. The store's lifetime is the process, not any single manager.
     this.notifications.clear()
     this.pendingNotifications.clear()
     this.pendingByParent.clear()
-    this.pendingParentWakes.clear()
     this.dispatchedParentWakes.clear()
-    this.notificationQueueByParent.clear()
     this.rootDescendantCounts.clear()
     this.queuesByKey.clear()
     this.processingKeys.clear()
