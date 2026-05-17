@@ -422,4 +422,99 @@ describe("observeEventForWatchdog", () => {
     expect(calls.progress).toEqual([])
     expect(calls.terminal).toEqual([])
   })
+
+  it.each([
+    ["text streaming", { sessionID, type: "text", text: "" }],
+    ["reasoning streaming", { sessionID, type: "reasoning", text: "" }],
+    ["tool starting", { sessionID, type: "tool", tool: "bash", state: { status: "running" } }],
+    ["tool_use", { sessionID, type: "tool_use", id: "t1", name: "bash" }],
+    ["tool_result", { sessionID, type: "tool_result", tool_use_id: "t1" }],
+    ["step-start", { sessionID, type: "step-start" }],
+    ["file", { sessionID, type: "file" }],
+  ])(
+    "#given a message.part.updated event whose part is %s #when observed #then onAssistantProgress is called so a long-running tool does not trip the watchdog (bug-03 fix)",
+    (_label, part) => {
+      const calls = freshCalls()
+      observeEventForWatchdog(
+        { type: "message.part.updated", properties: { part } },
+        createRecordingWatchdog(calls),
+      )
+      expect(calls.progress).toEqual([sessionID])
+      expect(calls.user).toEqual([])
+      expect(calls.terminal).toEqual([])
+    },
+  )
+
+  it("#given a message.part.updated event with no part #when observed #then no progress is signalled", () => {
+    const calls = freshCalls()
+    observeEventForWatchdog(
+      { type: "message.part.updated", properties: {} },
+      createRecordingWatchdog(calls),
+    )
+    expect(calls.progress).toEqual([])
+  })
+
+  it("#given a message.part.updated event with a part missing a type field #when observed #then no progress is signalled (defensive against malformed shapes)", () => {
+    const calls = freshCalls()
+    observeEventForWatchdog(
+      { type: "message.part.updated", properties: { part: { sessionID } } },
+      createRecordingWatchdog(calls),
+    )
+    expect(calls.progress).toEqual([])
+  })
+
+  it("#given a message.part.updated event whose sessionID lives on properties.sessionID (not part.sessionID) #when observed #then onAssistantProgress is called with that sessionID", () => {
+    const calls = freshCalls()
+    observeEventForWatchdog(
+      { type: "message.part.updated", properties: { sessionID, part: { type: "text" } } },
+      createRecordingWatchdog(calls),
+    )
+    expect(calls.progress).toEqual([sessionID])
+  })
+
+  it("#given a message.part.updated event with no resolvable sessionID #when observed #then nothing fires (cannot route to a session)", () => {
+    const calls = freshCalls()
+    observeEventForWatchdog(
+      { type: "message.part.updated", properties: { part: { type: "text" } } },
+      createRecordingWatchdog(calls),
+    )
+    expect(calls.progress).toEqual([])
+  })
+})
+
+describe("first-prompt-watchdog regression: bug-03 long-running tool call", () => {
+  beforeEach(() => {
+    subagentSessions.clear()
+  })
+
+  afterEach(() => {
+    subagentSessions.clear()
+  })
+
+  it("#given an armed watchdog and a streaming tool part arriving via message.part.updated #when the part is routed #then the watchdog is cancelled and never fires", async () => {
+    // given
+    const sessionID = "session-long-running-tool"
+    subagentSessions.add(sessionID)
+    const deps = createDeps(PLUGIN_CONFIG_WITH_FALLBACK)
+    const calls: RecordedCalls = { abort: [], autoRetry: [] }
+    const helpers = createHelpers(calls, AGENT)
+    const watchdog = createFirstPromptWatchdog(deps, helpers, WATCHDOG_MS)
+
+    // when
+    watchdog.onUserMessage(sessionID, PRIMARY_MODEL, AGENT)
+    observeEventForWatchdog(
+      {
+        type: "message.part.updated",
+        properties: { part: { sessionID, type: "tool", tool: "bash", state: { status: "running" } } },
+      },
+      watchdog,
+    )
+    await wait(SAFE_WAIT_AFTER_FIRE_MS)
+
+    // then
+    expect(calls.abort).toEqual([])
+    expect(calls.autoRetry).toEqual([])
+
+    watchdog.dispose()
+  })
 })
