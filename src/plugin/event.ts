@@ -376,7 +376,8 @@ export function createEventHandler(args: {
 
       firstMessageVariantGate.markSessionCreated(sessionInfo);
 
-      if (tmuxIntegrationEnabled) {
+      // Skip subagent sessions — handled by specialized callbacks in create-managers.ts and tool-registry.ts
+      if (tmuxIntegrationEnabled && !sessionInfo?.parentID) {
         await managers.tmuxSessionManager.onSessionCreated(
           event as {
             type: string;
