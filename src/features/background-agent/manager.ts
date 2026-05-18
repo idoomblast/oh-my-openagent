@@ -189,6 +189,7 @@ export class BackgroundManager {
 
   private tasks: Map<string, BackgroundTask>
   private tasksByParentSession: Map<string, Set<string>>
+  private completedTaskArchive: Map<string, BackgroundTask>
   private notifications: Map<string, BackgroundTask[]>
   private pendingNotifications: Map<string, string[]>
   private pendingByParent: Map<string, Set<string>>  // Track pending tasks per parent for batching
@@ -223,6 +224,7 @@ export class BackgroundManager {
     const { pluginContext, ...options } = config
     this.tasks = new Map()
     this.tasksByParentSession = new Map()
+    this.completedTaskArchive = new Map()
     this.notifications = new Map()
     this.pendingNotifications = new Map()
     this.pendingByParent = new Map()
@@ -339,6 +341,7 @@ export class BackgroundManager {
   }
 
   private removeTask(task: BackgroundTask): void {
+    this.completedTaskArchive.set(task.id, task)
     this.tasks.delete(task.id)
     this.removeTaskFromParentIndex(task.id, task.parentSessionId)
   }
@@ -796,7 +799,7 @@ The fallback retry session is now created and can be inspected directly.
   }
 
   getTask(id: string): BackgroundTask | undefined {
-    return this.tasks.get(id)
+    return this.tasks.get(id) ?? this.completedTaskArchive.get(id)
   }
 
   getTasksByParentSession(sessionID: string): BackgroundTask[] {
