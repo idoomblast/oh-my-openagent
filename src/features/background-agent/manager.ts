@@ -8,6 +8,7 @@ import type {
   LaunchInput,
   ResumeInput,
 } from "./types"
+import { getOrCreateBackgroundTaskStore, BackgroundTaskStore } from "./task-store"
 import { TaskHistory } from "./task-history"
 import {
   log,
@@ -190,6 +191,7 @@ export class BackgroundManager {
   private tasks: Map<string, BackgroundTask>
   private tasksByParentSession: Map<string, Set<string>>
   private completedTaskArchive: Map<string, BackgroundTask>
+  private taskStore: BackgroundTaskStore
   private notifications: Map<string, BackgroundTask[]>
   private pendingNotifications: Map<string, string[]>
   private pendingByParent: Map<string, Set<string>>  // Track pending tasks per parent for batching
@@ -222,9 +224,11 @@ export class BackgroundManager {
 
   constructor(config: BackgroundManagerConfig) {
     const { pluginContext, ...options } = config
-    this.tasks = new Map()
-    this.tasksByParentSession = new Map()
-    this.completedTaskArchive = new Map()
+    const taskStore = getOrCreateBackgroundTaskStore(pluginContext.directory)
+    this.taskStore = taskStore
+    this.tasks = taskStore.tasks
+    this.tasksByParentSession = taskStore.tasksByParentSession
+    this.completedTaskArchive = taskStore.completedTaskArchive
     this.notifications = new Map()
     this.pendingNotifications = new Map()
     this.pendingByParent = new Map()

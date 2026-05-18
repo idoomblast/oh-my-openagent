@@ -4,6 +4,7 @@ import { _resetForTesting as resetClaudeSessionState } from "./src/features/clau
 import { _resetTaskToastManagerForTesting as resetTaskToastManager } from "./src/features/task-toast-manager/manager"
 import { _resetForTesting as resetModelFallbackState } from "./src/hooks/model-fallback/hook"
 import { _resetMemCacheForTesting as resetConnectedProvidersCache } from "./src/shared/connected-providers-cache"
+import { _resetBackgroundTaskStoresForTesting as resetBackgroundTaskStores } from "./src/features/background-agent/task-store"
 import { getOmoOpenCodeCacheDir } from "./src/shared/data-path"
 import { installModuleMockLifecycle } from "./src/testing/module-mock-lifecycle"
 
@@ -24,6 +25,7 @@ beforeEach(() => {
   resetTaskToastManager()
   resetModelFallbackState()
   resetConnectedProvidersCache()
+  resetBackgroundTaskStores()
 })
 
 afterEach(() => {
