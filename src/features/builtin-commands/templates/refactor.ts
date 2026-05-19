@@ -346,7 +346,7 @@ After each refactoring step:
 
 \`\`\`
 Task(
-  subagent_type="prometheus",
+  subagent_type="plan",
   prompt="Create a detailed refactoring plan:
 
   ## Refactoring Goal
