@@ -58,6 +58,7 @@ import {
   TASK_CLEANUP_DELAY_MS,
   TASK_TTL_MS,
 } from "./constants"
+import { getOrCreateBackgroundTaskStore, type BackgroundTaskStore, type PendingParentWake } from "./task-store"
 import { formatDuration } from "./duration-formatter"
 import {
   extractErrorMessage,
@@ -265,6 +266,7 @@ export class BackgroundManager {
   private completedTaskArchive: Map<string, BackgroundTask>
   private completedTaskSummaries: Map<string, BackgroundTaskNotificationTask[]> = new Map()
   private idleDeferralTimers: Map<string, ReturnType<typeof setTimeout>> = new Map()
+  private pendingParentWakes: Map<string, PendingParentWake>
   private notificationQueueByParent: Map<string, Promise<void>> = new Map()
   private readonly parentWakeNotifier: ParentWakeNotifier
   private observedOutputSessions: Set<string> = new Set()
