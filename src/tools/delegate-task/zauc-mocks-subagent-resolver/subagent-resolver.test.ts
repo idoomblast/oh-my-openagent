@@ -167,9 +167,9 @@ describe("resolveSubagentExecution", () => {
     //#when
     const result = await resolveSubagentExecution(args, executorCtx, "sisyphus", "deep")
 
-    //#then
-    expect(result.error).toBeUndefined()
-    expect(result.agentToUse).toBe("Prometheus - Plan Builder")
+    //#then - plan-family handoff is disabled in this fork
+    expect(result.error).toBe('Cannot delegate to primary agent "Prometheus - Plan Builder" via task. Select that agent directly instead.')
+    expect(result.agentToUse).toBe("")
   })
 
   test("blocks plan-family parent from delegating to Prometheus (planner cannot delegate to planner)", async () => {

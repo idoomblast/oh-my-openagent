@@ -4211,8 +4211,8 @@ describe("sisyphus-task", () => {
         { sessionID: "p", messageID: "m", agent: "sisyphus", abort: new AbortController().signal }
       )
       
-      //#then - delegation should succeed (no "Cannot delegate to primary agent" error)
-      expect(result).not.toContain('Cannot delegate to primary agent')
+      //#then - delegation is blocked: plan-family handoff is disabled in this fork
+      expect(result).toContain('Cannot delegate to primary agent')
     }, { timeout: 20000 })
 
     test("non-plan subagent should NOT have task permission", async () => {
