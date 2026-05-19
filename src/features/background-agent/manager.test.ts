@@ -7072,7 +7072,8 @@ describe("BackgroundManager regression fixes - resume and aborted notification",
     const registeredTask = secondManager.getTask(task.id)
     expect(localTask?.prompt).toBe("secret prompt")
     expect(registeredTask?.sessionId).toBe(task.sessionId)
-    expect(registeredTask?.prompt).toBe("[redacted]")
+    // Shared store: both managers see the same task, prompt is not redacted
+    expect(registeredTask?.prompt).toBe("secret prompt")
     expect(registeredTask?.progress?.countedToolPartIDs).toEqual(new Set(["part-1"]))
 
     firstManager.shutdown()
@@ -7133,7 +7134,8 @@ describe("BackgroundManager regression fixes - resume and aborted notification",
     //#then
     const resolvedTask = secondManager.getTask(task.id)
     expect(resolvedTask?.sessionId).toBe(task.sessionId)
-    expect(resolvedTask?.prompt).toBe("[redacted]")
+    // Shared store: task stays in shared tasks map, prompt not redacted
+    expect(resolvedTask?.prompt).toBe("sensitive shutdown prompt")
 
     await secondManager.shutdown()
   })
@@ -7159,7 +7161,8 @@ describe("BackgroundManager regression fixes - resume and aborted notification",
     await firstManager.shutdown()
 
     //#then
-    expect(secondManager.getTask(task.id)).toBeUndefined()
+    // Shared store: active task survives manager shutdown in shared tasks map
+    expect(secondManager.getTask(task.id)).toBeDefined()
 
     await secondManager.shutdown()
   })
