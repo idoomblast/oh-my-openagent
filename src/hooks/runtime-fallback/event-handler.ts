@@ -45,9 +45,10 @@ export function createEventHandler(deps: HookDeps, helpers: AutoRetryHelpers) {
   }
 
   const handleSessionCreated = (props: Record<string, unknown> | undefined) => {
-    const sessionInfo = props?.info as { id?: string; model?: string } | undefined
+    const sessionInfo = props?.info as Record<string, unknown> | undefined
     const sessionID = resolveSessionEventID(props)
-    const model = sessionInfo?.model
+    const rawModel = sessionInfo?.model
+    const model = typeof rawModel === "string" ? rawModel : undefined
 
     if (sessionID && model) {
       log(`[${HOOK_NAME}] Session created with model`, { sessionID, model })
