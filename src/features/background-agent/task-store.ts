@@ -29,36 +29,14 @@ export type PendingParentWake = {
  *   timer can drain them).
  * - `notificationQueueByParent`: per-parent serialization chain so wakes for
  *   the same parent never interleave even across managers.
- * - `emittedTerminalTransitions`: dedup set so a "task X reached terminal
- *   status Y" event emits exactly one parent notification, regardless of
- *   how many managers observed the underlying signal.
  */
+
 export class BackgroundTaskStore {
   readonly tasks = new Map<string, BackgroundTask>()
   readonly tasksByParentSession = new Map<string, Set<string>>()
   readonly completedTaskArchive = new Map<string, BackgroundTask>()
   readonly pendingParentWakes = new Map<string, PendingParentWake>()
   readonly notificationQueueByParent = new Map<string, Promise<void>>()
-  readonly emittedTerminalTransitions = new Set<string>()
-
-  /**
-   * Atomically claim the right to emit a parent notification for the given
-   * (task, terminal transition) pair. Returns true exactly once across all
-   * managers sharing this store. Subsequent callers for the same pair get
-   * false and must skip notification.
-   *
-   * Each distinct terminal transition (completed, error, cancelled,
-   * interrupt, retry) for the same task is its own claim, so a task that
-   * errors, retries, then completes legitimately emits twice.
-   */
-  tryClaimTerminalTransition(taskId: string, transition: string): boolean {
-    const key = `${taskId}:${transition}`
-    if (this.emittedTerminalTransitions.has(key)) {
-      return false
-    }
-    this.emittedTerminalTransitions.add(key)
-    return true
-  }
 }
 
 const stores = new Map<string, BackgroundTaskStore>()

@@ -1988,17 +1988,9 @@ The task was re-queued on a fallback model after a retryable failure.
     this.notifications.set(task.parentSessionId, queue)
   }
 
-  private async emitTerminalNotification(task: BackgroundTask, transition: string): Promise<boolean> {
-    if (!this.taskStore.tryClaimTerminalTransition(task.id, transition)) {
-      log("[background-agent] Skipping duplicate terminal notification:", {
-        taskId: task.id,
-        transition,
-      })
-      return false
-    }
+  private async emitTerminalNotification(task: BackgroundTask, _transition: string): Promise<void> {
     this.markForNotification(task)
     await this.enqueueNotificationForParent(task.parentSessionId, () => this.notifyParentSession(task))
-    return true
   }
 
   getPendingNotifications(sessionID: string): BackgroundTask[] {
