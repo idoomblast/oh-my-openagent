@@ -70,6 +70,37 @@ type ParentWakeNotifierOptions = {
   parentSessionActivityInProgressWindowMs?: number
 }
 
+/**
+ * Guard the model field shape before forwarding it to OpenCode core.
+ */
+export function sanitizeParentWakeModel(
+  model: ParentWakePromptContext["model"],
+): ParentWakePromptContext["model"] | undefined {
+  if (!model || typeof model !== "object") return undefined
+  const candidate = model as { providerID?: unknown; modelID?: unknown }
+  if (typeof candidate.providerID !== "string" || candidate.providerID.length === 0) return undefined
+  if (typeof candidate.modelID !== "string" || candidate.modelID.length === 0) return undefined
+  return { providerID: candidate.providerID, modelID: candidate.modelID }
+}
+
+/**
+ * Drop non-boolean entries from the tools object.
+ */
+export function sanitizeParentWakeTools(
+  tools: ParentWakePromptContext["tools"],
+): Record<string, boolean> | undefined {
+  if (!tools || typeof tools !== "object") return undefined
+  const out: Record<string, boolean> = {}
+  let any = false
+  for (const [name, enabled] of Object.entries(tools)) {
+    if (typeof enabled === "boolean") {
+      out[name] = enabled
+      any = true
+    }
+  }
+  return any ? out : undefined
+}
+
 type ToolWaitDeferralDecision = {
   defer: boolean
   skipPromptGateToolStateCheck: boolean
@@ -88,50 +119,6 @@ function unrefTimerHandle(handle: ReturnType<typeof setTimeout>): void {
       // not a hard error.
     }
   }
-}
-
-/**
- * Guard the model field shape before forwarding it to OpenCode core.
- *
- * OpenCode core expects `body.model` to be `{ providerID: string, modelID: string }`.
- * A persisted session message with a legacy/corrupt `info.model` (e.g. a plain
- * string, undefined fields, or a non-object) can flow through
- * `compaction-aware-message-resolver` undetected. If we forwarded a bad shape,
- * OpenCode's internal `parseModel(model)` (or similar `model.trim()` paths)
- * would throw `model.trim is not a function`, surfacing as unhandledRejection.
- *
- * Bug-03 (model.trim crash, issue #4061) chain: OpenCode emits the rejection,
- * OMO's process-cleanup converts it to a fatal exit, the host dies. Tier 1
- * stops the fatal exit; this Tier 3 guard stops the rejection from being
- * emitted in the first place from the parent-wake code path.
- */
-export function sanitizeParentWakeModel(
-  model: ParentWakePromptContext["model"],
-): ParentWakePromptContext["model"] | undefined {
-  if (!model || typeof model !== "object") return undefined
-  const candidate = model as { providerID?: unknown; modelID?: unknown }
-  if (typeof candidate.providerID !== "string" || candidate.providerID.length === 0) return undefined
-  if (typeof candidate.modelID !== "string" || candidate.modelID.length === 0) return undefined
-  return { providerID: candidate.providerID, modelID: candidate.modelID }
-}
-
-/**
- * Drop non-boolean entries from the tools object. Persisted shapes can contain
- * stringified or numeric flags that would not be honored by OpenCode core.
- */
-export function sanitizeParentWakeTools(
-  tools: ParentWakePromptContext["tools"],
-): Record<string, boolean> | undefined {
-  if (!tools || typeof tools !== "object") return undefined
-  const out: Record<string, boolean> = {}
-  let any = false
-  for (const [name, enabled] of Object.entries(tools)) {
-    if (typeof enabled === "boolean") {
-      out[name] = enabled
-      any = true
-    }
-  }
-  return any ? out : undefined
 }
 
 export class ParentWakeNotifier {

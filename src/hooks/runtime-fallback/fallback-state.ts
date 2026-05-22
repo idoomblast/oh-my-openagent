@@ -50,12 +50,6 @@ function parseCanonicalModel(model: string): { providerID: string; modelID: stri
 }
 
 function isEquivalentModel(candidate: string, current: string): boolean {
-  // Runtime guard: model values from session events can be objects (providerID/modelID/variant)
-  // at runtime despite TypeScript types — toLowerCase() would crash on non-string input.
-  if (typeof candidate !== "string" || typeof current !== "string") {
-    return false
-  }
-
   const parsedCandidate = parseCanonicalModel(candidate)
   const parsedCurrent = parseCanonicalModel(current)
 

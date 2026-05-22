@@ -8,6 +8,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn, test } 
 
 import {
   _resetForTesting,
+  describeProcessCleanupError,
   registerManagerForCleanup,
   unregisterManagerForCleanup,
   __disableScheduledForcedExitForTesting,
@@ -155,7 +156,10 @@ describe("#given process cleanup registration", () => {
       expect(process.listeners("SIGINT")).toHaveLength(sigintListenersAfterFirstRegistration)
     })
 
-    test("#given two managers registered #when uncaughtException fires #then both shutdowns called", async () => {
+    test("#given two managers registered #when uncaughtException fires #then neither shutdown runs because the listener is log-only", async () => {
+      // Updated behavior: error events are log-only so a transient host error
+      // cannot tear down active background tasks. Real cleanup remains gated
+      // on SIGINT / SIGTERM / SIGBREAK / beforeExit / exit handlers.
       const exitSpy = spyOn(process, "exit").mockImplementation((() => undefined) as never)
       const shutdownOne = mock(() => {})
       const shutdownTwo = mock(() => {})
@@ -170,8 +174,8 @@ describe("#given process cleanup registration", () => {
         process.emit("uncaughtException", new Error("boom"))
         await flushMicrotasks()
 
-        expect(shutdownOne).toHaveBeenCalledTimes(1)
-        expect(shutdownTwo).toHaveBeenCalledTimes(1)
+        expect(shutdownOne).not.toHaveBeenCalled()
+        expect(shutdownTwo).not.toHaveBeenCalled()
       } finally {
         exitSpy.mockRestore()
       }
@@ -216,7 +220,7 @@ describe("#given process cleanup registration", () => {
       expect(removedManagerShutdown).not.toHaveBeenCalled()
     })
 
-    test("#given uncaughtException handler registered #when manager is unregistered via unregisterManagerForCleanup #then subsequent events do not invoke that manager", () => {
+    test("#given uncaughtException handler registered #when manager is unregistered via unregisterManagerForCleanup #then the global listener is removed AND emits no longer reach this plugin", () => {
       const uncaughtExceptionListenersBefore = process.listeners("uncaughtException")
       const shutdown = mock(() => {})
       const manager = { shutdown }
@@ -229,8 +233,12 @@ describe("#given process cleanup registration", () => {
 
       unregisterManagerForCleanup(manager)
       registeredManagers.length = 0
-      process.emit("uncaughtException", new Error("boom"))
 
+      expect(process.listeners("uncaughtException")).toHaveLength(
+        uncaughtExceptionListenersBefore.length,
+      )
+
+      process.emit("uncaughtException", new Error("boom"))
       expect(shutdown).not.toHaveBeenCalled()
     })
   })
@@ -333,7 +341,7 @@ describe("#given process cleanup registration", () => {
   })
 
   describe("#given uncaught exception and rejection cleanup", () => {
-    test("#given manager registered AND process emits uncaughtException #when event fires #then manager shuts down before process exits", async () => {
+    test("#given manager registered AND process emits uncaughtException #when event fires #then manager shutdown is NOT invoked because the listener is log-only", async () => {
       const exitSpy = spyOn(process, "exit").mockImplementation((() => undefined) as never)
       const shutdown = mock(() => {})
       const manager = { shutdown }
@@ -345,20 +353,13 @@ describe("#given process cleanup registration", () => {
         process.emit("uncaughtException", new Error("boom"))
         await flushMicrotasks()
 
-        expect(shutdown).toHaveBeenCalledTimes(1)
-        // exitSpy check skipped: scheduleForcedExit is disabled in tests to prevent
-        // process.exitCode from contaminating the bun test runner exit code.
+        expect(shutdown).not.toHaveBeenCalled()
       } finally {
         exitSpy.mockRestore()
       }
     })
 
-    test("#given manager registered AND process emits unhandledRejection #when event fires #then manager does NOT shut down (log-only by default)", async () => {
-      // Regression guard for the model.trim host-killer (issue #4061).
-      // Before the fix, an unhandledRejection from anywhere in the host
-      // (including OpenCode core or unrelated plugins) ran cleanupAll +
-      // process.exit(1), killing the entire OpenCode server/sidecar.
-      // The new default logs the rejection and keeps running.
+    test("#given manager registered AND process emits unhandledRejection #when event fires #then manager shutdown is NOT invoked because the listener is log-only", async () => {
       const exitSpy = spyOn(process, "exit").mockImplementation((() => undefined) as never)
       const shutdown = mock(() => {})
       const manager = { shutdown }
@@ -371,10 +372,108 @@ describe("#given process cleanup registration", () => {
         await flushMicrotasks()
 
         expect(shutdown).not.toHaveBeenCalled()
-        expect(exitSpy).not.toHaveBeenCalled()
       } finally {
         exitSpy.mockRestore()
       }
+    })
+
+    test("#given scheduleForcedExit enabled AND unhandledRejection fires #when the listener runs #then process.exit is NOT called AND process.exitCode stays 0 AND no cleanup runs", async () => {
+      // Regression guard for `/init-deep ulw` hang: a transient unhandled
+      // promise rejection (e.g. opencode's own session.processor aborting
+      // mid-stream) MUST NOT force-kill the host opencode process and MUST
+      // NOT tear down active background tasks. The listener is log-only;
+      // real shutdown stays on SIGINT / SIGTERM / SIGBREAK / beforeExit /
+      // exit.
+      const exitSpy = spyOn(process, "exit").mockImplementation((() => undefined) as never)
+      const setTimeoutSpy = spyOn(globalThis, "setTimeout")
+      const shutdown = mock(() => {})
+      const manager = { shutdown }
+      registeredManagers.push(manager)
+      __enableScheduledForcedExitForTesting()
+
+      try {
+        registerManagerForCleanup(manager)
+
+        process.emit("unhandledRejection", new Error("transient streaming rejection"), Promise.resolve())
+        await flushMicrotasks()
+
+        expect(shutdown).not.toHaveBeenCalled()
+        expect(exitSpy).not.toHaveBeenCalled()
+        expect(setTimeoutSpy).not.toHaveBeenCalled()
+        expect(process.exitCode).toBe(0)
+      } finally {
+        exitSpy.mockRestore()
+        setTimeoutSpy.mockRestore()
+        __disableScheduledForcedExitForTesting()
+        process.exitCode = 0
+      }
+    })
+
+    test("#given scheduleForcedExit enabled AND uncaughtException fires #when the listener runs #then process.exit is NOT called AND process.exitCode stays 0 AND no cleanup runs", async () => {
+      const exitSpy = spyOn(process, "exit").mockImplementation((() => undefined) as never)
+      const setTimeoutSpy = spyOn(globalThis, "setTimeout")
+      const shutdown = mock(() => {})
+      const manager = { shutdown }
+      registeredManagers.push(manager)
+      __enableScheduledForcedExitForTesting()
+
+      try {
+        registerManagerForCleanup(manager)
+
+        process.emit("uncaughtException", new Error("transient stream error"))
+        await flushMicrotasks()
+
+        expect(shutdown).not.toHaveBeenCalled()
+        expect(exitSpy).not.toHaveBeenCalled()
+        expect(setTimeoutSpy).not.toHaveBeenCalled()
+        expect(process.exitCode).toBe(0)
+      } finally {
+        exitSpy.mockRestore()
+        setTimeoutSpy.mockRestore()
+        __disableScheduledForcedExitForTesting()
+        process.exitCode = 0
+      }
+    })
+
+    test("#given repeated uncaughtException events #when manager is registered #then listener stays installed and host is not forced to exit", async () => {
+      const uncaughtExceptionListenersBefore = process.listeners("uncaughtException")
+      const exitSpy = spyOn(process, "exit").mockImplementation((() => undefined) as never)
+      const shutdown = mock(() => {})
+      const manager = { shutdown }
+      registeredManagers.push(manager)
+      __enableScheduledForcedExitForTesting()
+
+      try {
+        registerManagerForCleanup(manager)
+
+        process.emit("uncaughtException", new Error("first transient MCP failure"))
+        process.emit("uncaughtException", new Error("second transient MCP failure"))
+        await flushMicrotasks()
+
+        expect(process.listeners("uncaughtException")).toHaveLength(
+          uncaughtExceptionListenersBefore.length + 1,
+        )
+        expect(shutdown).not.toHaveBeenCalled()
+        expect(exitSpy).not.toHaveBeenCalled()
+        expect(process.exitCode).toBe(0)
+      } finally {
+        exitSpy.mockRestore()
+        __disableScheduledForcedExitForTesting()
+        process.exitCode = 0
+      }
+    })
+
+    test("#given a manager registered AND process emits 'exit' #then cleanup still runs (signal path remains the real shutdown gate)", () => {
+      const exitListenersBefore = process.listeners("exit")
+      const shutdown = mock(() => {})
+      const manager = { shutdown }
+      registeredManagers.push(manager)
+
+      registerManagerForCleanup(manager)
+      const exitListener = getNewListener("exit", exitListenersBefore)
+      exitListener()
+
+      expect(shutdown).toHaveBeenCalledTimes(1)
     })
 
     test("#given _resetForTesting() called #when event fires #then no cleanup runs", () => {
@@ -432,117 +531,40 @@ describe("#given process cleanup registration", () => {
 
       expect(reentrantShutdown.mock.calls.length).toBeLessThanOrEqual(1)
     })
-
-    test("#given default config AND unhandledRejection fires repeatedly #when 3 rejections arrive #then listener observes all 3 (re-attaches itself)", () => {
-      const observed: unknown[] = []
-      const log = (..._args: unknown[]): void => undefined
-      void log
-      const shutdown = mock(() => {})
-      const manager = { shutdown }
-      registeredManagers.push(manager)
-
-      registerManagerForCleanup(manager)
-
-      // The log-only listener must re-attach after each invocation so that
-      // subsequent rejections continue to be observed. Without re-attachment,
-      // the first detach-before-body would silently drop every rejection
-      // after the first one.
-      const initialListenerCount = process.listeners("unhandledRejection").length
-
-      process.emit("unhandledRejection", new Error("first"), Promise.resolve())
-      process.emit("unhandledRejection", new Error("second"), Promise.resolve())
-      process.emit("unhandledRejection", new Error("third"), Promise.resolve())
-      void observed
-
-      expect(process.listeners("unhandledRejection").length).toBe(initialListenerCount)
-      expect(shutdown).not.toHaveBeenCalled()
-    })
   })
 
-  describe("#given OMO_FORCE_EXIT_ON_REJECTION env var", () => {
-    let originalEnvValue: string | undefined
+  describe("#given describeProcessCleanupError", () => {
+    test("#given an Error object #when serialized #then name, message and stack are preserved", () => {
+      const error = new TypeError("transient stream failure")
 
-    beforeEach(() => {
-      originalEnvValue = process.env.OMO_FORCE_EXIT_ON_REJECTION
+      const describe = describeProcessCleanupError(error)
+
+      expect(describe).toMatchObject({
+        name: "TypeError",
+        message: "transient stream failure",
+      })
+      expect(typeof describe.stack).toBe("string")
+      expect(JSON.stringify(describe)).not.toBe("{}")
     })
 
-    afterEach(() => {
-      if (originalEnvValue === undefined) {
-        delete process.env.OMO_FORCE_EXIT_ON_REJECTION
-      } else {
-        process.env.OMO_FORCE_EXIT_ON_REJECTION = originalEnvValue
-      }
+    test("#given a plain object with own enumerable fields #when serialized #then JSON of the object is captured", () => {
+      const error = { code: "ENOENT", path: "/tmp/missing" }
+
+      const describe = describeProcessCleanupError(error)
+
+      expect(describe).toEqual({ raw: '{"code":"ENOENT","path":"/tmp/missing"}' })
     })
 
-    test("#given env var unset #when unhandledRejection fires #then manager does NOT shut down (log-only default)", async () => {
-      delete process.env.OMO_FORCE_EXIT_ON_REJECTION
-      const shutdown = mock(() => {})
-      const manager = { shutdown }
-      registeredManagers.push(manager)
+    test("#given an empty plain object #when serialized #then fallback to String(error) so '{}' never disappears silently", () => {
+      const describe = describeProcessCleanupError({})
 
-      registerManagerForCleanup(manager)
-
-      process.emit("unhandledRejection", new Error("boom"), Promise.resolve())
-      await flushMicrotasks()
-
-      expect(shutdown).not.toHaveBeenCalled()
+      expect(describe).toEqual({ raw: "[object Object]" })
     })
 
-    test("#given env var set to 1 #when unhandledRejection fires #then manager DOES shut down (legacy force-exit restored)", async () => {
-      process.env.OMO_FORCE_EXIT_ON_REJECTION = "1"
-      const shutdown = mock(() => {})
-      const manager = { shutdown }
-      registeredManagers.push(manager)
-
-      registerManagerForCleanup(manager)
-
-      process.emit("unhandledRejection", new Error("boom"), Promise.resolve())
-      await flushMicrotasks()
-
-      expect(shutdown).toHaveBeenCalledTimes(1)
-    })
-
-    test("#given env var set to true #when registerManagerForCleanup runs #then unhandledRejection handler IS registered", () => {
-      const unhandledRejectionListenersBefore = process.listeners("unhandledRejection")
-      process.env.OMO_FORCE_EXIT_ON_REJECTION = "true"
-      const manager = { shutdown: mock(() => {}) }
-      registeredManagers.push(manager)
-
-      registerManagerForCleanup(manager)
-
-      // Both default (log-only) and opt-in (force-exit) register exactly one
-      // listener. The difference is what the listener does, not whether it
-      // exists. Test the behavior (shutdown invocation) above; this assertion
-      // confirms the listener count contract.
-      expect(process.listeners("unhandledRejection")).toHaveLength(unhandledRejectionListenersBefore.length + 1)
-    })
-
-    test("#given env var set #when uncaughtException fires #then still force-exits regardless (env var only affects rejection)", async () => {
-      process.env.OMO_FORCE_EXIT_ON_REJECTION = "1"
-      const shutdown = mock(() => {})
-      const manager = { shutdown }
-      registeredManagers.push(manager)
-
-      registerManagerForCleanup(manager)
-
-      process.emit("uncaughtException", new Error("sync throw"))
-      await flushMicrotasks()
-
-      expect(shutdown).toHaveBeenCalledTimes(1)
-    })
-
-    test("#given env var UNSET #when uncaughtException fires #then still force-exits (uncaughtException is always fatal)", async () => {
-      delete process.env.OMO_FORCE_EXIT_ON_REJECTION
-      const shutdown = mock(() => {})
-      const manager = { shutdown }
-      registeredManagers.push(manager)
-
-      registerManagerForCleanup(manager)
-
-      process.emit("uncaughtException", new Error("sync throw"))
-      await flushMicrotasks()
-
-      expect(shutdown).toHaveBeenCalledTimes(1)
+    test("#given a primitive error value #when serialized #then String form is captured", () => {
+      expect(describeProcessCleanupError("oops")).toEqual({ raw: "oops" })
+      expect(describeProcessCleanupError(undefined)).toEqual({ raw: "undefined" })
+      expect(describeProcessCleanupError(null)).toEqual({ raw: "null" })
     })
   })
 })

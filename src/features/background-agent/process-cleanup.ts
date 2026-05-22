@@ -4,39 +4,28 @@ type ProcessCleanupSignal = NodeJS.Signals | "beforeExit" | "exit"
 type ProcessCleanupErrorEvent = "uncaughtException" | "unhandledRejection"
 
 /**
- * When set to a truthy value (1/true/yes/on), suppresses BOTH global
- * uncaughtException AND unhandledRejection handlers entirely (legacy
- * opt-out from issue #3856). Signal handlers stay registered.
+ * When set to a truthy value (1/true/yes/on), skips registering the global
+ * uncaughtException / unhandledRejection log listeners entirely.
+ *
+ * The listeners are log-only by default and no longer force-exit the host
+ * (originally a fix for issue #3856 that previously turned every transient
+ * streaming rejection into a `process.exit(1)`; reverified during the ulw
+ * `/init-deep` hang investigation that motivated the log-only rewrite).
+ * Setting this env var still makes the plugin silent on those events; leave
+ * it unset whenever you want the diagnostic line and the `name/message/stack`
+ * payload from `describeProcessCleanupError`.
+ *
+ * Signal handlers (SIGINT/SIGTERM/SIGBREAK/beforeExit/exit) remain registered
+ * because they are the real shutdown path and run `cleanupAll()` before the
+ * host actually terminates.
  */
 const PROCESS_CLEANUP_DISABLE_ENV = "OMO_DISABLE_PROCESS_CLEANUP"
-
-/**
- * When set to a truthy value, OPTS IN to the legacy behavior where an
- * unhandledRejection from anywhere in the host (including OpenCode core
- * or unrelated plugins) force-exits the process. Default is now log-only
- * for rejections to prevent OMO from killing the sidecar/server on
- * transient or third-party rejections (see issue #4061 + the model.trim
- * crash chain observed 2026-05-16).
- *
- * uncaughtException ALWAYS force-exits regardless of this flag — a
- * synchronously-thrown unhandled exception means the process state is
- * already corrupt.
- */
-const FORCE_EXIT_ON_REJECTION_ENV = "OMO_FORCE_EXIT_ON_REJECTION"
 const TRUTHY_ENV_VALUES = new Set(["1", "true", "yes", "on"])
 
-function isTruthyEnv(name: string): boolean {
-  const raw = process.env[name]
+function isProcessCleanupErrorHandlersDisabled(): boolean {
+  const raw = process.env[PROCESS_CLEANUP_DISABLE_ENV]
   if (!raw) return false
   return TRUTHY_ENV_VALUES.has(raw.trim().toLowerCase())
-}
-
-function isProcessCleanupErrorHandlersDisabled(): boolean {
-  return isTruthyEnv(PROCESS_CLEANUP_DISABLE_ENV)
-}
-
-function isForceExitOnRejectionEnabled(): boolean {
-  return isTruthyEnv(FORCE_EXIT_ON_REJECTION_ENV)
 }
 
 /** @internal test-only seam: prevents process.exitCode from contaminating bun test runner */
@@ -76,50 +65,72 @@ function registerProcessSignal(
   const listener = () => {
     const cleanupResult = handler()
     if (exitAfter) {
-      scheduleForcedExit(cleanupResult, 0)
+      scheduleForcedExit(cleanupResult, 0, true)
     }
   }
   process.on(signal, listener)
   return listener
 }
 
-function registerErrorEvent(
-  signal: ProcessCleanupErrorEvent,
-  handler: (error: unknown) => void | Promise<void>
-): (error: unknown) => void {
-  const listener = (error: unknown) => {
-    // Detach before running the body so a re-emit from inside log()/handler()
-    // (e.g. EPIPE while closing a broken pipe during shutdown) cannot recurse.
-    // Prior behavior: the listener re-entered itself, re-logged, re-ran cleanup,
-    // and threw EPIPE again — an unbounded loop that filled disks with 100+ GB
-    // of log lines in minutes before the 6 s forced-exit timer could fire.
-    process.off(signal, listener)
-    log(`[background-agent] ${signal} received during shutdown cleanup:`, error)
-    scheduleForcedExit(handler(error), 1, true)
+/** @internal test-only seam: exposes the error normalizer used by registerErrorEvent. */
+export function describeProcessCleanupError(error: unknown): Record<string, unknown> {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      stack: error.stack,
+    }
   }
-  process.on(signal, listener)
-  return listener
+  if (typeof error === "object" && error !== null) {
+    try {
+      const json = JSON.stringify(error)
+      if (json !== "{}") return { raw: json }
+    } catch {
+    }
+    return { raw: String(error) }
+  }
+  return { raw: String(error) }
 }
 
-/**
- * Log the rejection but do NOT shut down or exit. Used for unhandledRejection
- * by default, so OMO no longer kills the OpenCode host (CLI/Desktop sidecar)
- * on rejections that originated outside OMO code paths.
- *
- * Re-attaches itself after each invocation so subsequent rejections keep
- * being observed (Node's default would otherwise be silent).
- */
-function registerLoggingErrorEvent(
+function registerErrorEvent(
   signal: ProcessCleanupErrorEvent,
 ): (error: unknown) => void {
+  // Log-only listener. We deliberately DO NOT run cleanup or force-exit on
+  // transient errors.
+  //
+  // History: earlier this listener invoked `scheduleForcedExit(handler(error),
+  // 1, true)` so every unhandled promise rejection ran the registered cleanup
+  // (BackgroundManager shutdown, tmux pane closure, team-mode teardown) and
+  // then `process.exit(1)`'d the host. With OpenCode bundled under Bun, our
+  // listener already suppresses the default crash behavior, so the host was
+  // surviving the error itself but we were tearing it down ourselves. During
+  // heavy slash commands like `/init-deep` running in ulw mode that turned a
+  // single transient streaming error (e.g. a mid-stream socket reset or
+  // `session.processor` Aborted-process condition) into a frozen TUI for the
+  // user.
+  //
+  // The signal handlers (SIGINT / SIGTERM / SIGBREAK / beforeExit / exit)
+  // still cover real shutdown paths and run `cleanupAll()` before process
+  // termination. `exit` in particular fires for every controlled exit
+  // regardless of cause, so cleanup is not skipped when the host genuinely
+  // dies.
+  //
+  // Keep the listener installed after logging. Desktop sidecars can emit more
+  // than one transient error during MCP startup or provider reconnects; if we
+  // detach after the first event, the second uncaught exception falls through
+  // to Node's default process termination path and reproduces the exit-code-1
+  // crash from #4128. A local re-entry guard still prevents `log()` failures
+  // (for example EPIPE while writing during shutdown) from recursing into the
+  // 100+ GB log explosion that #3856-era regressions caused.
+  let logging = false
   const listener = (error: unknown) => {
-    process.off(signal, listener)
+    if (logging) return
+    logging = true
     log(
-      `[background-agent] ${signal} observed (non-fatal: OMO does not exit on this; `
-        + `set ${FORCE_EXIT_ON_REJECTION_ENV}=1 to restore legacy force-exit):`,
-      error,
+      `[background-agent] ${signal} observed; keeping host alive and skipping cleanup (signal handlers run on real shutdown)`,
+      describeProcessCleanupError(error),
     )
-    process.on(signal, listener)
+    logging = false
   }
   process.on(signal, listener)
   return listener
@@ -185,26 +196,8 @@ export function registerManagerForCleanup(manager: CleanupTarget): void {
     return
   }
 
-  // uncaughtException still force-exits: a synchronously-thrown unhandled
-  // exception means the process state is already corrupt.
-  cleanupErrorHandlers.set("uncaughtException", registerErrorEvent("uncaughtException", cleanupAll))
-
-  // unhandledRejection defaults to log-only. The legacy force-exit behavior
-  // killed the OpenCode host on rejections from OpenCode core (e.g. the
-  // model.trim crash) or unrelated plugins (e.g. ctx.$ from notification
-  // code, see issue #4061). Opt back in with OMO_FORCE_EXIT_ON_REJECTION=1.
-  if (isForceExitOnRejectionEnabled()) {
-    log(
-      `[background-agent] ${FORCE_EXIT_ON_REJECTION_ENV} is set; restoring legacy `
-        + "force-exit-on-unhandledRejection behavior.",
-    )
-    cleanupErrorHandlers.set(
-      "unhandledRejection",
-      registerErrorEvent("unhandledRejection", cleanupAll),
-    )
-  } else {
-    cleanupErrorHandlers.set("unhandledRejection", registerLoggingErrorEvent("unhandledRejection"))
-  }
+  cleanupErrorHandlers.set("uncaughtException", registerErrorEvent("uncaughtException"))
+  cleanupErrorHandlers.set("unhandledRejection", registerErrorEvent("unhandledRejection"))
 }
 
 export function unregisterManagerForCleanup(manager: CleanupTarget): void {

@@ -9,7 +9,6 @@ import { createFallbackState } from "./fallback-state"
 import { getFallbackModelsForSession } from "./fallback-models"
 import { resolveFallbackBootstrapModel } from "./fallback-bootstrap-model"
 import { dispatchFallbackRetry } from "./fallback-retry-dispatcher"
-import { resolveMessageEventSessionID } from "../../shared/event-session-id"
 
 const SOURCE = "first-prompt-watchdog"
 const SESSION_NEXT_EVENT_PREFIX = "session.next."
@@ -55,11 +54,6 @@ function hasAssistantCompletionMarker(info: Record<string, unknown>): boolean {
  *     `tool_use`, `tool_result`, `tool-call`, `step-start`, `file`, ...):
  *     the model has started responding. A subagent that immediately runs
  *     tools is *working*, not silent — so any part presence cancels.
- *   - `message.part.updated` carrying a part with a known type: the
- *     assistant's stream is mid-flight (e.g. a long-running Bash tool that
- *     has not yet emitted its containing `message.updated`). Treat this as
- *     progress so the watchdog does not misfire on legitimate >watchdogMs
- *     tool executions. See bug-03 root cause analysis.
  */
 export function observeEventForWatchdog(
   event: { type: string; properties?: unknown },
@@ -112,15 +106,6 @@ export function observeEventForWatchdog(
         watchdog.onAssistantProgress(sessionID)
       }
     }
-    return
-  }
-
-  if (event.type === "message.part.updated") {
-    const part = props.part as { type?: unknown } | undefined
-    if (!part || typeof part.type !== "string") return
-    const sessionID = resolveMessageEventSessionID(props)
-    if (!sessionID) return
-    watchdog.onAssistantProgress(sessionID)
     return
   }
 
