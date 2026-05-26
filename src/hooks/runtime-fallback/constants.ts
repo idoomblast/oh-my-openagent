@@ -59,8 +59,8 @@ export const HOOK_NAME = "runtime-fallback"
  * (assistant text/reasoning/finish) from a subagent session before assuming
  * the provider is silently stuck and dispatching the configured fallback.
  *
- * Tuned to be longer than typical first-token latency (well under 30s in
- * practice) yet much shorter than the 30-minute outer poll timeout that
- * would otherwise be the only safety net.
+ * Tuned to 180s (3 min) to accommodate slow-thinking models like
+ * chatgpt/gpt-5.5 that may spend >90s processing before emitting any
+ * visible output. Previously 90s which was too aggressive for these models.
  */
-export const DEFAULT_FIRST_PROMPT_WATCHDOG_MS = 90_000
+export const DEFAULT_FIRST_PROMPT_WATCHDOG_MS = 180_000

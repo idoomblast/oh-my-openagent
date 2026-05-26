@@ -50,6 +50,14 @@ function parseCanonicalModel(model: string): { providerID: string; modelID: stri
 }
 
 function isEquivalentModel(candidate: string, current: string): boolean {
+  // Defense: persisted session state can carry non-string model values
+  // (objects or undefined) that reach this function at runtime even though
+  // the TypeScript signature says `string`. Reject early instead of throwing
+  // "current.toLowerCase is not a function".
+  if (typeof candidate !== "string" || typeof current !== "string") {
+    return false
+  }
+
   const parsedCandidate = parseCanonicalModel(candidate)
   const parsedCurrent = parseCanonicalModel(current)
 

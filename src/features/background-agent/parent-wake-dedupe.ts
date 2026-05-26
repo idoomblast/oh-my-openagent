@@ -15,12 +15,33 @@ export type PendingParentWake = {
   toolCallDeferralStartedAt?: number
 }
 
+/**
+ * Sanitize the model field for parent-wake dispatch.
+ *
+ * Accepts only well-formed `{ providerID: string, modelID: string }` objects.
+ * Legacy string shapes (e.g. "anthropic/claude-opus-4-7") and malformed
+ * objects (missing providerID/modelID) are rejected — the field is omitted
+ * from the payload so OpenCode falls back to its configured default instead
+ * of passing garbage to `model.trim()` and throwing.
+ */
+export function sanitizeParentWakeModel(
+  model: unknown,
+): { providerID: string; modelID: string } | undefined {
+  if (typeof model === "object" && model !== null) {
+    const m = model as Record<string, unknown>
+    if (typeof m.providerID === "string" && typeof m.modelID === "string") {
+      return { providerID: m.providerID, modelID: m.modelID }
+    }
+  }
+  return undefined
+}
+
 export function resolveParentWakePromptContext(promptContext: ParentWakePromptContext): ParentWakePromptContext {
   const resolvedAgent = resolveRegisteredAgentName(promptContext.agent)
   return {
     ...promptContext,
     ...(resolvedAgent ? { agent: resolvedAgent } : {}),
-    ...(promptContext.model ? { model: { ...promptContext.model } } : {}),
+    model: sanitizeParentWakeModel(promptContext.model),
     ...(promptContext.tools ? { tools: { ...promptContext.tools } } : {}),
   }
 }
